@@ -9,6 +9,7 @@ from rest_framework.decorators import parser_classes
 from rest_framework.parsers import MultiPartParser, JSONParser
 
 from apps.BackPropagation.models import BackPropagation
+from apps.BackPropagation.serializers import BackPropagationSerializer
 from apps.Weights.models import Weights
 
 from channels.layers import get_channel_layer
@@ -20,26 +21,33 @@ def sigmoid(x):
 def sigmoid_derivative(x):
     return x * (1 - x)
 
-epochs = 50
-lr = 0.01
 inputLayerNeurons = 784
 hiddenLayerNeurons = 128
 outputLayerNeurons = 1
-batch_size = 50
 
 @api_view(['GET','POST'])
 @parser_classes([MultiPartParser , JSONParser])
 def backPropagation_api_view(request):
     if request.method == 'POST':
-        print('Decoding images...')
+        
+        name = request.data.get('name')
+        classes = request.data.get('clases')
+        input_size = request.data.get('input_size')
+        learning_rate = request.data.get('learning_rate')
+        training_percentage = request.data.get('training_percentage')
+        epochs = request.data.get('epochs')
+        batch_size = request.data.get('batch_size')
 
+        print('Decoding images...')
+        
         inputs = []
         expected_outputs = []
-
-        for indx, clase in enumerate(request.data.get('clases')):
+        
+        for indx, clase in enumerate(classes):
             # get the pixels of each image in the class folder
             path = os.path.join('examples',str(clase) )
-            for image in os.listdir(path):
+
+            for image in os.listdir(path)[:input_size]:
                 image_path = os.path.join(path,image)
                 img = Image.open(image_path)
                 img_gray = img.convert('L')
@@ -61,11 +69,12 @@ def backPropagation_api_view(request):
         expected_outputs = expected_outputs[random_permutation]
         
         # divide the inputs and expected outputs into training and testing sets
-        training_inputs = inputs[:int(inputs.shape[0] * 0.8)]
-        training_expected_outputs = expected_outputs[:int(expected_outputs.shape[0] * 0.8)]
+        training_size = round(inputs.shape[0] * training_percentage / 100)
+        training_inputs = inputs[:training_size]
+        training_expected_outputs = expected_outputs[:training_size]
 
-        testing_inputs = inputs[int(inputs.shape[0] * 0.8):]
-        testing_expected_outputs = expected_outputs[int(expected_outputs.shape[0] * 0.8):]
+        testing_inputs = inputs[training_size:]
+        testing_expected_outputs = expected_outputs[training_size:]
 
         # Xavier/Glorot Initialization for hidden layer
         bound_hidden = np.sqrt(6. / (inputLayerNeurons + hiddenLayerNeurons))
@@ -113,25 +122,24 @@ def backPropagation_api_view(request):
                 d_hidden_layer = error_hidden_layer * sigmoid_derivative(hidden_layer_output)
 
                 # Updating Weights and Biases
-                output_weights += np.dot(hidden_layer_output.T, d_predicted_output) * lr
-                output_bias += np.sum(d_predicted_output,axis=0,keepdims=True) * lr
-                hidden_weights += np.dot(np.array(batch_inputs).T, d_hidden_layer) * lr
-                hidden_bias += np.sum(d_hidden_layer,axis=0,keepdims=True) * lr
+                output_weights += np.dot(hidden_layer_output.T, d_predicted_output) * learning_rate
+                output_bias += np.sum(d_predicted_output,axis=0,keepdims=True) * learning_rate
+                hidden_weights += np.dot(np.array(batch_inputs).T, d_hidden_layer) * learning_rate
+                hidden_bias += np.sum(d_hidden_layer,axis=0,keepdims=True) * learning_rate
 
-            if( _ % 10 == 0):
-                print('Epoch: ', _)
-                print('Error: ', np.mean(np.abs(error)))
-
-                channel_layer = get_channel_layer()
-                train_details = {
-                        'type': 'train_details',  # This should match the method name in your consumer
-                        'text': { 
-                            'epoch':_, 
-                            'error': np.mean(np.abs(error)),  
-                            'progress': _ / epochs * 100
-                        },
-                    }   
-                async_to_sync(channel_layer.group_send)('progress_group', train_details)
+                # Send the progress through the websocket
+                if( ((_+1) * batch_num) % 10 == 0):
+                
+                    channel_layer = get_channel_layer()
+                    train_details = {
+                            'type': 'train_details', 
+                            'text': { 
+                                'epoch':_, 
+                                'error': np.mean(np.abs(error)),  
+                                'progress': _ / epochs * 100
+                            },
+                        }   
+                    async_to_sync(channel_layer.group_send)('progress_group', train_details)
         
         print('Done!')
 
@@ -155,11 +163,14 @@ def backPropagation_api_view(request):
 
         # 4. Save the weights and biases
         back_prop = BackPropagation.objects.create(
+            name = name,
+            classA = request.data.get('clases')[0]-30,
+            classB = request.data.get('clases')[1]-30,
             epochs = epochs,
-            learning_rate = lr,
+            learning_rate = learning_rate,
             batch_size = batch_size,
-            input_size = 1000,
-            training_percentage = 0.8,
+            input_size = input_size,
+            training_percentage = training_percentage,
             accuracy = accuracy
         )
         
@@ -171,12 +182,6 @@ def backPropagation_api_view(request):
             output_bias = output_bias.tolist()
         )
 
-        """
-        print(np.array(inputs).shape)
-        print(np.array(expected_outputs).shape)
-        
-        print( np.array([ [1,2],[3,4],[5,6] ]).flatten().shape )
-        """
 
         return Response({
             'message': 'Training succesful, the weights and biases has been saved!',
@@ -185,15 +190,46 @@ def backPropagation_api_view(request):
             status=status.HTTP_200_OK)
 
 
-    if(request.method == 'GET'):
-        pass
-
-@api_view(['GET','PUT','DELETE'])
+@api_view(['GET'])
 @parser_classes([MultiPartParser, JSONParser])
-def backPropagation_detail_api_view(request, pk=None ):
-    if request.method == 'GET':
-        pass
-    if request.method == 'PUT':
-        pass
-    if request.method == 'DELETE':
-        pass
+def trainings_api_view(request ):
+    if(request.method == 'GET'):
+        back_prop = BackPropagation.objects.all()
+        back_prop_serializer = BackPropagationSerializer(back_prop, many=True)
+        return Response(back_prop_serializer.data, status=status.HTTP_200_OK)
+        
+@api_view(['POST'])
+@parser_classes([MultiPartParser, JSONParser])
+def predict_api_view(request):
+    if request.method == 'POST':
+        network = request.data.get('networkId')
+        inputs = request.data.get('inputs')
+        inputs = np.array([inputs])
+        back_prop = BackPropagation.objects.get(idBackPropagation=network)
+        weights = Weights.objects.get(backPropagation=back_prop)
+        
+        hidden_weights = np.array(weights.hiden_weights)
+        output_weights = np.array(weights.output_weights)
+        hidden_bias = np.array(weights.hiden_bias)
+        output_bias = np.array(weights.output_bias)
+
+        hidden_layer_activation = np.dot(inputs, hidden_weights)
+        hidden_layer_activation += hidden_bias
+        hidden_layer_output = sigmoid(hidden_layer_activation)
+
+        output_layer_activation = np.dot(hidden_layer_output, output_weights)
+        output_layer_activation += output_bias
+
+        predicted_output = sigmoid(output_layer_activation)
+
+        if predicted_output > 0.5 : 
+            predicted_class = back_prop.classA
+        else :
+            predicted_class = back_prop.classB
+
+        return Response({
+            'message': 'Prediction succesful!',
+            'prediction': predicted_class,
+            }, 
+            status=status.HTTP_200_OK)
+    
